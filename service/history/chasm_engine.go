@@ -104,12 +104,12 @@ func (e *ChasmEngine) StartExecution(
 
 	shardContext, err := e.getShardContext(executionRef)
 	if err != nil {
-		return chasm.StartExecutionResult{}, err
+		return chasm.StartExecutionResult{}, e.convertError(err, 0, "", nil)
 	}
 
 	archetypeID, err := executionRef.ArchetypeID(e.registry)
 	if err != nil {
-		return chasm.StartExecutionResult{}, err
+		return chasm.StartExecutionResult{}, e.convertError(err, 0, executionRef.BusinessID, shardContext.GetLogger())
 	}
 
 	if executionRef.RunID != "" {
@@ -124,10 +124,13 @@ func (e *ChasmEngine) StartExecution(
 		archetypeID,
 	)
 	if err != nil {
-		return chasm.StartExecutionResult{}, err
+		return chasm.StartExecutionResult{}, e.convertError(err, archetypeID, executionRef.BusinessID, shardContext.GetLogger())
 	}
 	defer func() {
 		currentExecutionReleaseFn(retErr)
+		if retErr != nil {
+			retErr = e.convertError(retErr, archetypeID, executionRef.BusinessID, shardContext.GetLogger())
+		}
 	}()
 
 	newExecutionParams, err := e.createNewExecution(
@@ -139,7 +142,7 @@ func (e *ChasmEngine) StartExecution(
 		options,
 	)
 	if err != nil {
-		return chasm.StartExecutionResult{}, err
+		return chasm.StartExecutionResult{}, e.convertError(err, archetypeID, executionRef.BusinessID, shardContext.GetLogger())
 	}
 
 	currentRunInfo, hasCurrentRun, err := e.persistAsBrandNew(
@@ -151,7 +154,7 @@ func (e *ChasmEngine) StartExecution(
 		// Even though Created is false, it's not guaranteed the execution wasn't created.
 		// The persistence layer writes history events outside the main transaction, so on errors
 		// like network timeouts etc., the operation outcome is ambiguous.
-		return chasm.StartExecutionResult{}, err
+		return chasm.StartExecutionResult{}, e.convertError(err, archetypeID, executionRef.BusinessID, shardContext.GetLogger())
 	}
 	if !hasCurrentRun {
 		serializedRef, err := newExecutionParams.executionRef.Serialize(e.registry)
@@ -160,7 +163,7 @@ func (e *ChasmEngine) StartExecution(
 			return chasm.StartExecutionResult{
 				ExecutionKey: newExecutionParams.executionRef.ExecutionKey,
 				Created:      true,
-			}, err
+			}, e.convertError(err, archetypeID, executionRef.BusinessID, shardContext.GetLogger())
 		}
 		return chasm.StartExecutionResult{
 			ExecutionKey: newExecutionParams.executionRef.ExecutionKey,
@@ -169,13 +172,17 @@ func (e *ChasmEngine) StartExecution(
 		}, nil
 	}
 
-	return e.handleExecutionConflict(
+	result, err = e.handleExecutionConflict(
 		ctx,
 		shardContext,
 		newExecutionParams,
 		currentRunInfo,
 		options,
 	)
+	if err != nil {
+		return result, e.convertError(err, archetypeID, executionRef.BusinessID, shardContext.GetLogger())
+	}
+	return result, nil
 }
 
 func (e *ChasmEngine) UpdateWithStartExecution(
@@ -996,7 +1003,7 @@ func (e *ChasmEngine) getExecutionLease(
 		lockPriority,
 	)
 	if err != nil {
-		return nil, nil, e.convertError(err, archetypeID, ref.BusinessID)
+		return nil, nil, e.convertError(err, archetypeID, ref.BusinessID, shardContext.GetLogger())
 	}
 
 	if predicateErr != nil {
@@ -1050,17 +1057,87 @@ func (e *ChasmEngine) getExecutionLease(
 	return shardContext, executionLease, nil
 }
 
-// convertError is a hook containing error conversion logic that creates more appropriate and/or
-// helpful errors.
-func (e *ChasmEngine) convertError(err error, archetypeID chasm.ArchetypeID, businessID string) error {
-	switch {
-	case errors.As(err, new(*serviceerror.NotFound)):
-		displayName, ok := e.registry.ArchetypeDisplayName(archetypeID)
-		if !ok {
-			displayName = "execution"
+// convertError converts non-serviceerror errors to appropriate serviceerror types.
+// It ensures all errors returned are serviceerrors and handles persistence layer errors appropriately.
+// When archetypeID and businessID are provided (non-zero/non-empty), it can provide more helpful
+// NotFound error messages.
+func (e *ChasmEngine) convertError(
+	err error,
+	archetypeID chasm.ArchetypeID,
+	businessID string,
+	logger log.Logger,
+) error {
+	// Handle NotFound errors with archetype-specific display names
+	if errors.As(err, new(*serviceerror.NotFound)) {
+		if archetypeID != 0 && businessID != "" {
+			displayName, ok := e.registry.ArchetypeDisplayName(archetypeID)
+			if !ok {
+				displayName = "execution"
+			}
+			return serviceerror.NewNotFoundf("%s not found for ID: %s", displayName, businessID)
 		}
-		return serviceerror.NewNotFoundf("%s not found for ID: %s", displayName, businessID)
-	default:
 		return err
 	}
+
+	// Use type switch for efficient error type detection
+	// Preserve chasm-specific and serviceerror types, convert persistence errors
+	logErrMessage := ""
+	var returnErr error
+	switch err := err.(type) {
+	// Chasm-specific errors - return as-is
+	case *chasm.ExecutionAlreadyStartedError:
+		return err
+
+	// ServiceErrors - return as-is (already properly formatted for clients)
+	case *serviceerror.InvalidArgument,
+		*serviceerror.AlreadyExists,
+		*serviceerror.FailedPrecondition,
+		*serviceerror.ResourceExhausted,
+		*serviceerror.Canceled,
+		*serviceerror.DeadlineExceeded,
+		*serviceerror.Internal,
+		*serviceerror.Unavailable,
+		*serviceerror.DataLoss,
+		*serviceerror.PermissionDenied,
+		*serviceerror.Unimplemented,
+		*serviceerror.NamespaceNotActive:
+		return err
+
+	// Persistence layer errors - convert to appropriate serviceerror types
+	case *persistence.ShardOwnershipLostError:
+		logErrMessage = err.Msg
+		returnErr = serviceerror.NewUnavailablef("shard ownership lost for shard %d", err.ShardID)
+	case *persistence.AppendHistoryTimeoutError:
+		logErrMessage = err.Msg
+		returnErr = serviceerror.NewUnavailablef("append history timed out")
+	case *persistence.WorkflowConditionFailedError:
+		logErrMessage = fmt.Sprintf("workflow condition failed for DBRecordVersion %d, nextEventID %d: %s",
+			err.DBRecordVersion, err.NextEventID, err.Msg)
+		returnErr = serviceerror.NewUnavailable("workflow condition failed")
+	case *persistence.CurrentWorkflowConditionFailedError:
+		logErrMessage = fmt.Sprintf("current workflow condition failed for RunID %s, Status %s, State %s: %s",
+			err.RunID, err.Status.String(), err.State.String(), err.Msg)
+		returnErr = serviceerror.NewUnavailablef("current workflow condition failed for RunID %s", err.RunID)
+	case *persistence.ConditionFailedError:
+		logErrMessage = fmt.Sprintf("condition failed: %s", err.Msg)
+		returnErr = serviceerror.NewUnavailable("condition failed")
+	case *persistence.TransactionSizeLimitError:
+		logErrMessage = fmt.Sprintf("transaction size limit exceeded: %s", err.Msg)
+		returnErr = serviceerror.NewInvalidArgument("transaction size limit exceeded")
+	case *persistence.TimeoutError:
+		logErrMessage = fmt.Sprintf("persistence operation timed out: %s", err.Msg)
+		returnErr = serviceerror.NewDeadlineExceeded("persistence operation timed out")
+	default:
+		logErrMessage = fmt.Sprintf("uncategorized chasm engine error: %v", err)
+		returnErr = serviceerror.NewUnavailablef("uncategorized chasm engine error")
+	}
+
+	if logger != nil && logErrMessage != "" {
+		logger.Error(
+			logErrMessage,
+			tag.Error(err),
+		)
+	}
+
+	return returnErr
 }

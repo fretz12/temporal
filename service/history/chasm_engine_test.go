@@ -2,6 +2,8 @@ package history
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -1566,4 +1568,154 @@ func (l *testChasmLibrary) Components() []*chasm.RegistrableComponent {
 		chasm.NewRegistrableComponent[*testComponent]("test_component",
 			chasm.WithSearchAttributes(testComponentPausedSearchAttribute)),
 	}
+}
+
+func (s *chasmEngineSuite) TestConvertError() {
+	t := s.T()
+	tv := testvars.New(t)
+	logger := s.mockShard.GetLogger()
+	archetypeID := s.archetypeID
+	businessID := tv.WorkflowID()
+
+	t.Run("NotFound_WithArchetypeAndBusinessID", func(t *testing.T) {
+		err := serviceerror.NewNotFound("original not found")
+		convertedErr := s.engine.convertError(err, archetypeID, businessID, logger)
+		require.Error(t, convertedErr)
+		var notFoundErr *serviceerror.NotFound
+		require.ErrorAs(t, convertedErr, &notFoundErr)
+		require.Equal(t, fmt.Sprintf("%s not found for ID: %s", "test_component", businessID), convertedErr.Error())
+	})
+
+	t.Run("NotFound_WithoutArchetypeID", func(t *testing.T) {
+		err := serviceerror.NewNotFound("original not found")
+		convertedErr := s.engine.convertError(err, 0, businessID, logger)
+		require.Error(t, convertedErr)
+		var notFoundErr *serviceerror.NotFound
+		require.ErrorAs(t, convertedErr, &notFoundErr)
+		require.Equal(t, err, convertedErr)
+	})
+
+	t.Run("NotFound_WithoutBusinessID", func(t *testing.T) {
+		err := serviceerror.NewNotFound("original not found")
+		convertedErr := s.engine.convertError(err, archetypeID, "", logger)
+		require.Error(t, convertedErr)
+		var notFoundErr *serviceerror.NotFound
+		require.ErrorAs(t, convertedErr, &notFoundErr)
+		require.Equal(t, err, convertedErr)
+	})
+
+	t.Run("UnconvertedServiceErrors", func(t *testing.T) {
+		testErrors := []error{
+			chasm.NewExecutionAlreadyStartedErr("already started", "request-123", "run-456"),
+			serviceerror.NewInvalidArgument("invalid argument"),
+			serviceerror.NewAlreadyExists("already exists"),
+			serviceerror.NewFailedPrecondition("failed precondition"),
+			serviceerror.NewResourceExhausted(enumspb.RESOURCE_EXHAUSTED_CAUSE_APS_LIMIT, "resource exhausted"),
+			serviceerror.NewCanceled("canceled"),
+			serviceerror.NewDeadlineExceeded("deadline exceeded"),
+			serviceerror.NewInternal("internal error"),
+			serviceerror.NewUnavailable("unavailable"),
+			serviceerror.NewDataLoss("data loss"),
+			serviceerror.NewPermissionDenied("permission denied", ""),
+			serviceerror.NewUnimplemented("unimplemented"),
+			serviceerror.NewNamespaceNotActive("test-namespace", "cluster1", "cluster2"),
+		}
+
+		for _, err := range testErrors {
+			convertedErr := s.engine.convertError(err, archetypeID, businessID, logger)
+			require.Equal(t, err, convertedErr)
+		}
+	})
+
+	t.Run("PersistenceErrors", func(t *testing.T) {
+		persistenceErrorCases := []struct {
+			name            string
+			err             error
+			expectedErrType any
+			expectedErrMsg  []string
+		}{
+			{
+				name: "ShardOwnershipLostError",
+				err: &persistence.ShardOwnershipLostError{
+					ShardID: 123,
+					Msg:     "shard ownership lost",
+				},
+				expectedErrType: &serviceerror.Unavailable{},
+				expectedErrMsg:  []string{"shard ownership lost", "123"},
+			},
+			{
+				name: "AppendHistoryTimeoutError",
+				err: &persistence.AppendHistoryTimeoutError{
+					Msg: "append history timeout",
+				},
+				expectedErrType: &serviceerror.Unavailable{},
+				expectedErrMsg:  []string{"append history timed out"},
+			},
+			{
+				name: "WorkflowConditionFailedError",
+				err: &persistence.WorkflowConditionFailedError{
+					Msg:             "workflow condition failed",
+					DBRecordVersion: 10,
+					NextEventID:     20,
+				},
+				expectedErrType: &serviceerror.Unavailable{},
+				expectedErrMsg:  []string{"workflow condition failed"},
+			},
+			{
+				name: "CurrentWorkflowConditionFailedError",
+				err: &persistence.CurrentWorkflowConditionFailedError{
+					Msg:    "current workflow condition failed",
+					RunID:  tv.RunID(),
+					Status: enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING,
+					State:  enumsspb.WORKFLOW_EXECUTION_STATE_RUNNING,
+				},
+				expectedErrType: &serviceerror.Unavailable{},
+				expectedErrMsg:  []string{"current workflow condition failed", tv.RunID()},
+			},
+			{
+				name: "ConditionFailedError",
+				err: &persistence.ConditionFailedError{
+					Msg: "condition failed",
+				},
+				expectedErrType: &serviceerror.Unavailable{},
+				expectedErrMsg:  []string{"condition failed"},
+			},
+			{
+				name: "TransactionSizeLimitError",
+				err: &persistence.TransactionSizeLimitError{
+					Msg: "transaction too large",
+				},
+				expectedErrType: &serviceerror.InvalidArgument{},
+				expectedErrMsg:  []string{"transaction size limit exceeded"},
+			},
+			{
+				name: "TimeoutError",
+				err: &persistence.TimeoutError{
+					Msg: "persistence timeout",
+				},
+				expectedErrType: &serviceerror.DeadlineExceeded{},
+				expectedErrMsg:  []string{"persistence operation timed out"},
+			},
+		}
+
+		for _, tc := range persistenceErrorCases {
+			t.Run(tc.name, func(t *testing.T) {
+				convertedErr := s.engine.convertError(tc.err, archetypeID, businessID, logger)
+				require.Error(t, convertedErr)
+				require.ErrorAs(t, convertedErr, &tc.expectedErrType)
+				for _, msg := range tc.expectedErrMsg {
+					require.Contains(t, convertedErr.Error(), msg)
+				}
+			})
+		}
+	})
+
+	t.Run("UncategorizedError", func(t *testing.T) {
+		err := errors.New("some unknown error")
+		convertedErr := s.engine.convertError(err, archetypeID, businessID, logger)
+		require.Error(t, convertedErr)
+		var unavailableErr *serviceerror.Unavailable
+		require.ErrorAs(t, convertedErr, &unavailableErr)
+		require.Contains(t, convertedErr.Error(), "uncategorized chasm engine error")
+	})
 }
