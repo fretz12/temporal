@@ -1574,30 +1574,35 @@ func (s *chasmEngineSuite) TestConvertError() {
 	t := s.T()
 	tv := testvars.New(t)
 	logger := s.mockShard.GetLogger()
-	archetypeID := s.archetypeID
 	businessID := tv.WorkflowID()
 
-	t.Run("NotFound_WithArchetypeAndBusinessID", func(t *testing.T) {
+	ref := chasm.NewComponentRef[*testComponent](
+		chasm.ExecutionKey{
+			NamespaceID: string(tests.NamespaceID),
+			BusinessID:  businessID,
+			RunID:       tv.RunID(),
+		},
+	)
+
+	t.Run("NotFound", func(t *testing.T) {
 		err := serviceerror.NewNotFound("original not found")
-		convertedErr := s.engine.convertError(err, archetypeID, businessID, logger)
+		convertedErr := s.engine.convertError(err, ref, logger)
 		require.Error(t, convertedErr)
 		var notFoundErr *serviceerror.NotFound
 		require.ErrorAs(t, convertedErr, &notFoundErr)
 		require.Equal(t, fmt.Sprintf("%s not found for ID: %s", "test_component", businessID), convertedErr.Error())
 	})
 
-	t.Run("NotFound_WithoutArchetypeID", func(t *testing.T) {
-		err := serviceerror.NewNotFound("original not found")
-		convertedErr := s.engine.convertError(err, 0, businessID, logger)
-		require.Error(t, convertedErr)
-		var notFoundErr *serviceerror.NotFound
-		require.ErrorAs(t, convertedErr, &notFoundErr)
-		require.Equal(t, err, convertedErr)
-	})
-
 	t.Run("NotFound_WithoutBusinessID", func(t *testing.T) {
+		refWithoutBusinessID := chasm.NewComponentRef[*testComponent](
+			chasm.ExecutionKey{
+				NamespaceID: string(tests.NamespaceID),
+				BusinessID:  "",
+				RunID:       tv.RunID(),
+			},
+		)
 		err := serviceerror.NewNotFound("original not found")
-		convertedErr := s.engine.convertError(err, archetypeID, "", logger)
+		convertedErr := s.engine.convertError(err, refWithoutBusinessID, logger)
 		require.Error(t, convertedErr)
 		var notFoundErr *serviceerror.NotFound
 		require.ErrorAs(t, convertedErr, &notFoundErr)
@@ -1622,7 +1627,7 @@ func (s *chasmEngineSuite) TestConvertError() {
 		}
 
 		for _, err := range testErrors {
-			convertedErr := s.engine.convertError(err, archetypeID, businessID, logger)
+			convertedErr := s.engine.convertError(err, ref, logger)
 			require.Equal(t, err, convertedErr)
 		}
 	})
@@ -1700,7 +1705,7 @@ func (s *chasmEngineSuite) TestConvertError() {
 
 		for _, tc := range persistenceErrorCases {
 			t.Run(tc.name, func(t *testing.T) {
-				convertedErr := s.engine.convertError(tc.err, archetypeID, businessID, logger)
+				convertedErr := s.engine.convertError(tc.err, ref, logger)
 				require.Error(t, convertedErr)
 				require.ErrorAs(t, convertedErr, &tc.expectedErrType)
 				for _, msg := range tc.expectedErrMsg {
@@ -1712,7 +1717,7 @@ func (s *chasmEngineSuite) TestConvertError() {
 
 	t.Run("UncategorizedError", func(t *testing.T) {
 		err := errors.New("some unknown error")
-		convertedErr := s.engine.convertError(err, archetypeID, businessID, logger)
+		convertedErr := s.engine.convertError(err, ref, logger)
 		require.Error(t, convertedErr)
 		var unavailableErr *serviceerror.Unavailable
 		require.ErrorAs(t, convertedErr, &unavailableErr)
