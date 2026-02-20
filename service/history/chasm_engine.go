@@ -1082,35 +1082,50 @@ func (e *ChasmEngine) convertError(
 		return nil
 	}
 
-	// Handle NotFound errors with archetype-specific display names
-	if errors.As(err, new(*serviceerror.NotFound)) {
-		archID, archErr := ref.ArchetypeID(e.registry)
-		if archErr != nil {
-			return err
-		}
+	if convertedErr := e.convertNotFoundError(err, ref); convertedErr != nil {
+		return convertedErr
+	}
 
-		if archID != chasm.UnspecifiedArchetypeID && ref.BusinessID != "" {
-			displayName, ok := e.registry.ArchetypeDisplayName(archID)
-			if !ok {
-				displayName = "execution"
-			}
-			return serviceerror.NewNotFoundf("%s not found for ID: %s", displayName, ref.BusinessID)
-		}
+	if e.isContextOrPassthroughError(err) {
 		return err
 	}
 
+	return e.convertPersistenceError(err, logger)
+}
+
+func (e *ChasmEngine) convertNotFoundError(err error, ref chasm.ComponentRef) error {
+	if !errors.As(err, new(*serviceerror.NotFound)) {
+		return nil
+	}
+
+	archID, archErr := ref.ArchetypeID(e.registry)
+	if archErr != nil {
+		return err
+	}
+
+	if archID != chasm.UnspecifiedArchetypeID && ref.BusinessID != "" {
+		displayName, ok := e.registry.ArchetypeDisplayName(archID)
+		if !ok {
+			displayName = "execution"
+		}
+		return serviceerror.NewNotFoundf("%s not found for ID: %s", displayName, ref.BusinessID)
+	}
+	return err
+}
+
+func (e *ChasmEngine) isContextOrPassthroughError(err error) bool {
 	// Return context errors as-is
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
+		return true
 	}
 
 	// Chasm-specific errors - return as-is
 	if errors.As(err, new(*chasm.ExecutionAlreadyStartedError)) {
-		return err
+		return true
 	}
 
 	// ServiceErrors - return as-is (already properly formatted for clients)
-	if errors.As(err, new(*serviceerror.InvalidArgument)) ||
+	return errors.As(err, new(*serviceerror.InvalidArgument)) ||
 		errors.As(err, new(*serviceerror.AlreadyExists)) ||
 		errors.As(err, new(*serviceerror.FailedPrecondition)) ||
 		errors.As(err, new(*serviceerror.ResourceExhausted)) ||
@@ -1121,14 +1136,10 @@ func (e *ChasmEngine) convertError(
 		errors.As(err, new(*serviceerror.DataLoss)) ||
 		errors.As(err, new(*serviceerror.PermissionDenied)) ||
 		errors.As(err, new(*serviceerror.Unimplemented)) ||
-		errors.As(err, new(*serviceerror.NamespaceNotActive)) {
-		return err
-	}
+		errors.As(err, new(*serviceerror.NamespaceNotActive))
+}
 
-	// Persistence layer errors - convert to appropriate serviceerror types and log internal details without exposing
-	// them to clients
-	logErrMessage := ""
-	var returnErr error
+func (e *ChasmEngine) convertPersistenceError(err error, logger log.Logger) error {
 	var shardOwnershipLostErr *persistence.ShardOwnershipLostError
 	var appendHistoryTimeoutErr *persistence.AppendHistoryTimeoutError
 	var workflowConditionFailedErr *persistence.WorkflowConditionFailedError
@@ -1136,6 +1147,9 @@ func (e *ChasmEngine) convertError(
 	var conditionFailedErr *persistence.ConditionFailedError
 	var transactionSizeLimitErr *persistence.TransactionSizeLimitError
 	var timeoutErr *persistence.TimeoutError
+
+	var logErrMessage string
+	var returnErr error
 
 	switch {
 	case errors.As(err, &shardOwnershipLostErr):
@@ -1168,7 +1182,7 @@ func (e *ChasmEngine) convertError(
 		returnErr = serviceerror.NewDeadlineExceeded("persistence operation timed out")
 	default:
 		logErrMessage = fmt.Sprintf("uncategorized chasm engine error: %v", err)
-		returnErr = serviceerror.NewUnavailablef("uncategorized chasm engine error")
+		returnErr = serviceerror.NewUnavailable("uncategorized chasm engine error")
 	}
 
 	if logger != nil && logErrMessage != "" {
