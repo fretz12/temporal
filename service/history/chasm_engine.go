@@ -211,18 +211,18 @@ func (e *ChasmEngine) UpdateWithStartExecution(
 		}()
 
 		if executionLease.GetMutableState().IsWorkflowExecutionRunning() {
-			executionKey, executionRef, err := e.updateExecution(ctx, shardContext, executionLease, executionRef, updateFn)
+			executionKey, newExecutionRef, err := e.updateExecution(ctx, shardContext, executionLease, executionRef, updateFn)
 			if err != nil {
-				return chasm.EngineUpdateWithStartExecutionResult{}, err
+				return chasm.EngineUpdateWithStartExecutionResult{}, e.convertError(err, executionRef, shardContext.GetLogger())
 			}
 			return chasm.EngineUpdateWithStartExecutionResult{
 				ExecutionKey: executionKey,
-				ExecutionRef: executionRef,
+				ExecutionRef: newExecutionRef,
 				Created:      false,
 			}, nil
 		}
 
-		executionKey, executionRef, created, err := e.startNewForClosedExecution(
+		executionKey, newExecutionRef, created, err := e.startNewForClosedExecution(
 			ctx,
 			shardContext,
 			executionLease,
@@ -233,11 +233,11 @@ func (e *ChasmEngine) UpdateWithStartExecution(
 			options,
 		)
 		if err != nil {
-			return chasm.EngineUpdateWithStartExecutionResult{}, err
+			return chasm.EngineUpdateWithStartExecutionResult{}, e.convertError(err, executionRef, shardContext.GetLogger())
 		}
 		return chasm.EngineUpdateWithStartExecutionResult{
 			ExecutionKey: executionKey,
-			ExecutionRef: executionRef,
+			ExecutionRef: newExecutionRef,
 			Created:      created,
 		}, nil
 	case *serviceerror.NotFound:
@@ -1124,19 +1124,9 @@ func (e *ChasmEngine) isContextOrPassthroughError(err error) bool {
 		return true
 	}
 
-	// ServiceErrors - return as-is (already properly formatted for clients)
-	return errors.As(err, new(*serviceerror.InvalidArgument)) ||
-		errors.As(err, new(*serviceerror.AlreadyExists)) ||
-		errors.As(err, new(*serviceerror.FailedPrecondition)) ||
-		errors.As(err, new(*serviceerror.ResourceExhausted)) ||
-		errors.As(err, new(*serviceerror.Canceled)) ||
-		errors.As(err, new(*serviceerror.DeadlineExceeded)) ||
-		errors.As(err, new(*serviceerror.Internal)) ||
-		errors.As(err, new(*serviceerror.Unavailable)) ||
-		errors.As(err, new(*serviceerror.DataLoss)) ||
-		errors.As(err, new(*serviceerror.PermissionDenied)) ||
-		errors.As(err, new(*serviceerror.Unimplemented)) ||
-		errors.As(err, new(*serviceerror.NamespaceNotActive))
+	// ServiceErrors - return as-is
+	var se serviceerror.ServiceError
+	return errors.As(err, &se)
 }
 
 func (e *ChasmEngine) convertPersistenceOrUnknownError(err error, logger log.Logger) error {

@@ -1573,6 +1573,7 @@ func (l *testChasmLibrary) Components() []*chasm.RegistrableComponent {
 func (s *chasmEngineSuite) TestConvertError() {
 	t := s.T()
 	tv := testvars.New(t)
+	tv = tv.WithRunID(tv.Any().RunID())
 	logger := s.mockShard.GetLogger()
 	businessID := tv.WorkflowID()
 
