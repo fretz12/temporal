@@ -1774,28 +1774,24 @@ func (s *chasmEngineSuite) TestConvertError() {
 	t.Run("ContextErrors", func(t *testing.T) {
 		t.Run("ContextCanceled", func(t *testing.T) {
 			convertedErr := s.engine.convertError(context.Canceled, ref, logger)
-			require.ErrorAs(t, convertedErr, new(*serviceerror.Canceled))
-			require.Contains(t, convertedErr.Error(), "request canceled")
+			require.ErrorIs(t, convertedErr, context.Canceled)
 		})
 
 		t.Run("ContextDeadlineExceeded", func(t *testing.T) {
 			convertedErr := s.engine.convertError(context.DeadlineExceeded, ref, logger)
-			require.ErrorAs(t, convertedErr, new(*serviceerror.DeadlineExceeded))
-			require.Contains(t, convertedErr.Error(), "request deadline exceeded")
+			require.ErrorIs(t, convertedErr, context.DeadlineExceeded)
 		})
 
 		t.Run("WrappedContextCanceled", func(t *testing.T) {
 			wrappedErr := fmt.Errorf("operation canceled: %w", context.Canceled)
 			convertedErr := s.engine.convertError(wrappedErr, ref, logger)
-			require.ErrorAs(t, convertedErr, new(*serviceerror.Canceled))
-			require.Contains(t, convertedErr.Error(), "request canceled")
+			require.ErrorIs(t, convertedErr, context.Canceled)
 		})
 
 		t.Run("WrappedContextDeadlineExceeded", func(t *testing.T) {
 			wrappedErr := fmt.Errorf("operation timed out: %w", context.DeadlineExceeded)
 			convertedErr := s.engine.convertError(wrappedErr, ref, logger)
-			require.ErrorAs(t, convertedErr, new(*serviceerror.DeadlineExceeded))
-			require.Contains(t, convertedErr.Error(), "request deadline exceeded")
+			require.ErrorIs(t, convertedErr, context.DeadlineExceeded)
 		})
 	})
 }

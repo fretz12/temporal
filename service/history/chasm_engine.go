@@ -552,7 +552,7 @@ func (e *ChasmEngine) PollComponent(
 				return ref, e.convertError(err, requestRef, logger)
 			}
 		case <-ctx.Done():
-			return nil, e.convertError(ctx.Err(), requestRef, nil)
+			return nil, ctx.Err()
 		}
 	}
 }
@@ -1099,12 +1099,9 @@ func (e *ChasmEngine) convertError(
 		return err
 	}
 
-	// Convert context errors to service errors
-	if errors.Is(err, context.Canceled) {
-		return serviceerror.NewCanceled("request canceled")
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return serviceerror.NewDeadlineExceeded("request deadline exceeded")
+	// Return context errors as-is
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
 	}
 
 	// Chasm-specific errors - return as-is
