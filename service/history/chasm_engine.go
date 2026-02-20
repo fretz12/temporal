@@ -1090,7 +1090,7 @@ func (e *ChasmEngine) convertError(
 		return err
 	}
 
-	return e.convertPersistenceError(err, logger)
+	return e.convertPersistenceOrUnknownError(err, logger)
 }
 
 func (e *ChasmEngine) convertNotFoundError(err error, ref chasm.ComponentRef) error {
@@ -1139,58 +1139,28 @@ func (e *ChasmEngine) isContextOrPassthroughError(err error) bool {
 		errors.As(err, new(*serviceerror.NamespaceNotActive))
 }
 
-func (e *ChasmEngine) convertPersistenceError(err error, logger log.Logger) error {
-	var shardOwnershipLostErr *persistence.ShardOwnershipLostError
-	var appendHistoryTimeoutErr *persistence.AppendHistoryTimeoutError
-	var workflowConditionFailedErr *persistence.WorkflowConditionFailedError
-	var currentWorkflowConditionFailedErr *persistence.CurrentWorkflowConditionFailedError
-	var conditionFailedErr *persistence.ConditionFailedError
-	var transactionSizeLimitErr *persistence.TransactionSizeLimitError
-	var timeoutErr *persistence.TimeoutError
-
-	var logErrMessage string
-	var returnErr error
-
+func (e *ChasmEngine) convertPersistenceOrUnknownError(err error, logger log.Logger) error {
 	switch {
-	case errors.As(err, &shardOwnershipLostErr):
-		logErrMessage = shardOwnershipLostErr.Msg
-		returnErr = serviceerror.NewUnavailable("shard ownership lost")
-	case errors.As(err, &appendHistoryTimeoutErr):
-		logErrMessage = appendHistoryTimeoutErr.Msg
-		returnErr = serviceerror.NewUnavailable("append history timed out")
-	case errors.As(err, &workflowConditionFailedErr):
-		logErrMessage = fmt.Sprintf("workflow condition failed for DBRecordVersion %d, nextEventID %d: %s",
-			workflowConditionFailedErr.DBRecordVersion, workflowConditionFailedErr.NextEventID, workflowConditionFailedErr.Msg)
-		returnErr = serviceerror.NewUnavailable("workflow condition failed")
-	case errors.As(err, &currentWorkflowConditionFailedErr):
-		logErrMessage = fmt.Sprintf(
-			"current workflow condition failed for RunID %s, Status %s, State %s: %s",
-			currentWorkflowConditionFailedErr.RunID,
-			currentWorkflowConditionFailedErr.Status.String(),
-			currentWorkflowConditionFailedErr.State.String(),
-			currentWorkflowConditionFailedErr.Msg)
-		returnErr = serviceerror.NewUnavailablef("current workflow condition failed for RunID %s",
-			currentWorkflowConditionFailedErr.RunID)
-	case errors.As(err, &conditionFailedErr):
-		logErrMessage = fmt.Sprintf("condition failed: %s", conditionFailedErr.Msg)
-		returnErr = serviceerror.NewUnavailable("condition failed")
-	case errors.As(err, &transactionSizeLimitErr):
-		logErrMessage = fmt.Sprintf("transaction size limit exceeded: %s", transactionSizeLimitErr.Msg)
-		returnErr = serviceerror.NewInvalidArgument("transaction size limit exceeded")
-	case errors.As(err, &timeoutErr):
-		logErrMessage = fmt.Sprintf("persistence operation timed out: %s", timeoutErr.Msg)
-		returnErr = serviceerror.NewDeadlineExceeded("persistence operation timed out")
+	case errors.As(err, new(*persistence.ShardOwnershipLostError)):
+		return serviceerror.NewUnavailable("shard ownership lost")
+	case errors.As(err, new(*persistence.AppendHistoryTimeoutError)):
+		return serviceerror.NewUnavailable("append history timed out")
+	case errors.As(err, new(*persistence.WorkflowConditionFailedError)):
+		return serviceerror.NewUnavailable("workflow condition failed")
+	case errors.As(err, new(*persistence.CurrentWorkflowConditionFailedError)):
+		var e *persistence.CurrentWorkflowConditionFailedError
+		errors.As(err, &e)
+		return serviceerror.NewUnavailablef("current workflow condition failed for RunID %s", e.RunID)
+	case errors.As(err, new(*persistence.ConditionFailedError)):
+		return serviceerror.NewUnavailable("condition failed")
+	case errors.As(err, new(*persistence.TransactionSizeLimitError)):
+		return serviceerror.NewInvalidArgument("transaction size limit exceeded")
+	case errors.As(err, new(*persistence.TimeoutError)):
+		return serviceerror.NewDeadlineExceeded("persistence operation timed out")
 	default:
-		logErrMessage = fmt.Sprintf("uncategorized chasm engine error: %v", err)
-		returnErr = serviceerror.NewUnavailable("uncategorized chasm engine error")
+		if logger != nil {
+			logger.Error("uncategorized chasm engine error", tag.Error(err))
+		}
+		return serviceerror.NewUnavailable("uncategorized chasm engine error")
 	}
-
-	if logger != nil && logErrMessage != "" {
-		logger.Error(
-			logErrMessage,
-			tag.Error(err),
-		)
-	}
-
-	return returnErr
 }
