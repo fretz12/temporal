@@ -552,7 +552,7 @@ func (e *ChasmEngine) PollComponent(
 				return ref, e.convertError(err, requestRef, logger)
 			}
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, e.convertError(ctx.Err(), requestRef, nil)
 		}
 	}
 }
