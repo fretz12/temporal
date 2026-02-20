@@ -1634,10 +1634,10 @@ func (s *chasmEngineSuite) TestConvertError() {
 
 	t.Run("PersistenceErrors", func(t *testing.T) {
 		persistenceErrorCases := []struct {
-			name            string
-			err             error
-			expectedErrType any
-			expectedErrMsg  []string
+			name           string
+			err            error
+			assertErrType  func(t *testing.T, err error)
+			expectedErrMsg []string
 		}{
 			{
 				name: "ShardOwnershipLostError",
@@ -1645,16 +1645,22 @@ func (s *chasmEngineSuite) TestConvertError() {
 					ShardID: 123,
 					Msg:     "shard ownership lost",
 				},
-				expectedErrType: &serviceerror.Unavailable{},
-				expectedErrMsg:  []string{"shard ownership lost", "123"},
+				assertErrType: func(t *testing.T, err error) {
+					var unavailable *serviceerror.Unavailable
+					require.ErrorAs(t, err, &unavailable)
+				},
+				expectedErrMsg: []string{"shard ownership lost", "123"},
 			},
 			{
 				name: "AppendHistoryTimeoutError",
 				err: &persistence.AppendHistoryTimeoutError{
 					Msg: "append history timeout",
 				},
-				expectedErrType: &serviceerror.Unavailable{},
-				expectedErrMsg:  []string{"append history timed out"},
+				assertErrType: func(t *testing.T, err error) {
+					var unavailable *serviceerror.Unavailable
+					require.ErrorAs(t, err, &unavailable)
+				},
+				expectedErrMsg: []string{"append history timed out"},
 			},
 			{
 				name: "WorkflowConditionFailedError",
@@ -1663,8 +1669,11 @@ func (s *chasmEngineSuite) TestConvertError() {
 					DBRecordVersion: 10,
 					NextEventID:     20,
 				},
-				expectedErrType: &serviceerror.Unavailable{},
-				expectedErrMsg:  []string{"workflow condition failed"},
+				assertErrType: func(t *testing.T, err error) {
+					var unavailable *serviceerror.Unavailable
+					require.ErrorAs(t, err, &unavailable)
+				},
+				expectedErrMsg: []string{"workflow condition failed"},
 			},
 			{
 				name: "CurrentWorkflowConditionFailedError",
@@ -1674,32 +1683,44 @@ func (s *chasmEngineSuite) TestConvertError() {
 					Status: enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING,
 					State:  enumsspb.WORKFLOW_EXECUTION_STATE_RUNNING,
 				},
-				expectedErrType: &serviceerror.Unavailable{},
-				expectedErrMsg:  []string{"current workflow condition failed", tv.RunID()},
+				assertErrType: func(t *testing.T, err error) {
+					var unavailable *serviceerror.Unavailable
+					require.ErrorAs(t, err, &unavailable)
+				},
+				expectedErrMsg: []string{"current workflow condition failed", tv.RunID()},
 			},
 			{
 				name: "ConditionFailedError",
 				err: &persistence.ConditionFailedError{
 					Msg: "condition failed",
 				},
-				expectedErrType: &serviceerror.Unavailable{},
-				expectedErrMsg:  []string{"condition failed"},
+				assertErrType: func(t *testing.T, err error) {
+					var unavailable *serviceerror.Unavailable
+					require.ErrorAs(t, err, &unavailable)
+				},
+				expectedErrMsg: []string{"condition failed"},
 			},
 			{
 				name: "TransactionSizeLimitError",
 				err: &persistence.TransactionSizeLimitError{
 					Msg: "transaction too large",
 				},
-				expectedErrType: &serviceerror.InvalidArgument{},
-				expectedErrMsg:  []string{"transaction size limit exceeded"},
+				assertErrType: func(t *testing.T, err error) {
+					var invalidArgument *serviceerror.InvalidArgument
+					require.ErrorAs(t, err, &invalidArgument)
+				},
+				expectedErrMsg: []string{"transaction size limit exceeded"},
 			},
 			{
 				name: "TimeoutError",
 				err: &persistence.TimeoutError{
 					Msg: "persistence timeout",
 				},
-				expectedErrType: &serviceerror.DeadlineExceeded{},
-				expectedErrMsg:  []string{"persistence operation timed out"},
+				assertErrType: func(t *testing.T, err error) {
+					var deadlineExceeded *serviceerror.DeadlineExceeded
+					require.ErrorAs(t, err, &deadlineExceeded)
+				},
+				expectedErrMsg: []string{"persistence operation timed out"},
 			},
 		}
 
@@ -1707,7 +1728,7 @@ func (s *chasmEngineSuite) TestConvertError() {
 			t.Run(tc.name, func(t *testing.T) {
 				convertedErr := s.engine.convertError(tc.err, ref, logger)
 				require.Error(t, convertedErr)
-				require.ErrorAs(t, convertedErr, &tc.expectedErrType)
+				tc.assertErrType(t, convertedErr)
 				for _, msg := range tc.expectedErrMsg {
 					require.Contains(t, convertedErr.Error(), msg)
 				}
@@ -1722,5 +1743,59 @@ func (s *chasmEngineSuite) TestConvertError() {
 		var unavailableErr *serviceerror.Unavailable
 		require.ErrorAs(t, convertedErr, &unavailableErr)
 		require.Contains(t, convertedErr.Error(), "uncategorized chasm engine error")
+	})
+
+	t.Run("WrappedErrors", func(t *testing.T) {
+		// Test that wrapped errors are properly detected using errors.As()
+		t.Run("WrappedServiceError", func(t *testing.T) {
+			baseErr := serviceerror.NewInvalidArgument("invalid input")
+			wrappedErr := fmt.Errorf("context: %w", baseErr)
+			convertedErr := s.engine.convertError(wrappedErr, ref, logger)
+			require.ErrorAs(t, convertedErr, new(*serviceerror.InvalidArgument))
+		})
+
+		t.Run("WrappedPersistenceError", func(t *testing.T) {
+			baseErr := &persistence.TimeoutError{Msg: "timeout"}
+			wrappedErr := fmt.Errorf("operation failed: %w", baseErr)
+			convertedErr := s.engine.convertError(wrappedErr, ref, logger)
+			require.ErrorAs(t, convertedErr, new(*serviceerror.DeadlineExceeded))
+			require.Contains(t, convertedErr.Error(), "persistence operation timed out")
+		})
+
+		t.Run("WrappedChasmError", func(t *testing.T) {
+			baseErr := chasm.NewExecutionAlreadyStartedErr("already started", tv.RequestID(), tv.RunID())
+			wrappedErr := fmt.Errorf("wrapped: %w", baseErr)
+			convertedErr := s.engine.convertError(wrappedErr, ref, logger)
+			var chasmErr *chasm.ExecutionAlreadyStartedError
+			require.ErrorAs(t, convertedErr, &chasmErr)
+		})
+	})
+
+	t.Run("ContextErrors", func(t *testing.T) {
+		t.Run("ContextCanceled", func(t *testing.T) {
+			convertedErr := s.engine.convertError(context.Canceled, ref, logger)
+			require.ErrorAs(t, convertedErr, new(*serviceerror.Canceled))
+			require.Contains(t, convertedErr.Error(), "request canceled")
+		})
+
+		t.Run("ContextDeadlineExceeded", func(t *testing.T) {
+			convertedErr := s.engine.convertError(context.DeadlineExceeded, ref, logger)
+			require.ErrorAs(t, convertedErr, new(*serviceerror.DeadlineExceeded))
+			require.Contains(t, convertedErr.Error(), "request deadline exceeded")
+		})
+
+		t.Run("WrappedContextCanceled", func(t *testing.T) {
+			wrappedErr := fmt.Errorf("operation canceled: %w", context.Canceled)
+			convertedErr := s.engine.convertError(wrappedErr, ref, logger)
+			require.ErrorAs(t, convertedErr, new(*serviceerror.Canceled))
+			require.Contains(t, convertedErr.Error(), "request canceled")
+		})
+
+		t.Run("WrappedContextDeadlineExceeded", func(t *testing.T) {
+			wrappedErr := fmt.Errorf("operation timed out: %w", context.DeadlineExceeded)
+			convertedErr := s.engine.convertError(wrappedErr, ref, logger)
+			require.ErrorAs(t, convertedErr, new(*serviceerror.DeadlineExceeded))
+			require.Contains(t, convertedErr.Error(), "request deadline exceeded")
+		})
 	})
 }

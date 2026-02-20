@@ -436,7 +436,8 @@ func (e *ChasmEngine) UpdateComponent(
 
 	serializedRef, err := e.applyUpdateWithLease(ctx, shardContext, executionLease, ref, updateFn)
 	if err != nil {
-		// Error conversion is handled applyUpdateWithLease as we don't want to convert any errors from updateFn
+		// Error conversion is handled inside applyUpdateWithLease as we don't want to convert any errors originating
+		// from updateFn
 		return nil, err
 	}
 
@@ -1071,10 +1072,10 @@ func (e *ChasmEngine) getExecutionLease(
 	return shardContext, executionLease, nil
 }
 
-// convertError converts non-serviceerror errors to appropriate serviceerror types.
-// It ensures all errors returned are serviceerrors and handles persistence layer errors appropriately.
-// When component archetypeID and businessID are provided (non-zero/non-empty), it can provide more helpful
-// NotFound error messages.
+// convertError converts non-serviceerror errors to appropriate serviceerror types, or keeps any chasm specific errors
+// as is. It ensures all errors returned are service or chasm errors and also  handles persistence layer errors
+// appropriately. When component archetypeID and businessID are non-zero/non-empty, it can provide more helpful NotFound
+// error messages.
 func (e *ChasmEngine) convertError(
 	err error,
 	ref chasm.ComponentRef,
@@ -1101,52 +1102,75 @@ func (e *ChasmEngine) convertError(
 		return err
 	}
 
-	logErrMessage := ""
-	var returnErr error
-	switch err := err.(type) {
+	// Convert context errors to service errors
+	if errors.Is(err, context.Canceled) {
+		return serviceerror.NewCanceled("request canceled")
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return serviceerror.NewDeadlineExceeded("request deadline exceeded")
+	}
+
 	// Chasm-specific errors - return as-is
-	case *chasm.ExecutionAlreadyStartedError:
+	if errors.As(err, new(*chasm.ExecutionAlreadyStartedError)) {
 		return err
+	}
 
 	// ServiceErrors - return as-is (already properly formatted for clients)
-	case *serviceerror.InvalidArgument,
-		*serviceerror.AlreadyExists,
-		*serviceerror.FailedPrecondition,
-		*serviceerror.ResourceExhausted,
-		*serviceerror.Canceled,
-		*serviceerror.DeadlineExceeded,
-		*serviceerror.Internal,
-		*serviceerror.Unavailable,
-		*serviceerror.DataLoss,
-		*serviceerror.PermissionDenied,
-		*serviceerror.Unimplemented,
-		*serviceerror.NamespaceNotActive:
+	if errors.As(err, new(*serviceerror.InvalidArgument)) ||
+		errors.As(err, new(*serviceerror.AlreadyExists)) ||
+		errors.As(err, new(*serviceerror.FailedPrecondition)) ||
+		errors.As(err, new(*serviceerror.ResourceExhausted)) ||
+		errors.As(err, new(*serviceerror.Canceled)) ||
+		errors.As(err, new(*serviceerror.DeadlineExceeded)) ||
+		errors.As(err, new(*serviceerror.Internal)) ||
+		errors.As(err, new(*serviceerror.Unavailable)) ||
+		errors.As(err, new(*serviceerror.DataLoss)) ||
+		errors.As(err, new(*serviceerror.PermissionDenied)) ||
+		errors.As(err, new(*serviceerror.Unimplemented)) ||
+		errors.As(err, new(*serviceerror.NamespaceNotActive)) {
 		return err
+	}
 
 	// Persistence layer errors - convert to appropriate serviceerror types and log internal details without exposing
 	// them to clients
-	case *persistence.ShardOwnershipLostError:
-		logErrMessage = err.Msg
-		returnErr = serviceerror.NewUnavailablef("shard ownership lost for shard %d", err.ShardID)
-	case *persistence.AppendHistoryTimeoutError:
-		logErrMessage = err.Msg
+	logErrMessage := ""
+	var returnErr error
+	var shardOwnershipLostErr *persistence.ShardOwnershipLostError
+	var appendHistoryTimeoutErr *persistence.AppendHistoryTimeoutError
+	var workflowConditionFailedErr *persistence.WorkflowConditionFailedError
+	var currentWorkflowConditionFailedErr *persistence.CurrentWorkflowConditionFailedError
+	var conditionFailedErr *persistence.ConditionFailedError
+	var transactionSizeLimitErr *persistence.TransactionSizeLimitError
+	var timeoutErr *persistence.TimeoutError
+
+	switch {
+	case errors.As(err, &shardOwnershipLostErr):
+		logErrMessage = shardOwnershipLostErr.Msg
+		returnErr = serviceerror.NewUnavailablef("shard ownership lost for shard %d", shardOwnershipLostErr.ShardID)
+	case errors.As(err, &appendHistoryTimeoutErr):
+		logErrMessage = appendHistoryTimeoutErr.Msg
 		returnErr = serviceerror.NewUnavailablef("append history timed out")
-	case *persistence.WorkflowConditionFailedError:
+	case errors.As(err, &workflowConditionFailedErr):
 		logErrMessage = fmt.Sprintf("workflow condition failed for DBRecordVersion %d, nextEventID %d: %s",
-			err.DBRecordVersion, err.NextEventID, err.Msg)
+			workflowConditionFailedErr.DBRecordVersion, workflowConditionFailedErr.NextEventID, workflowConditionFailedErr.Msg)
 		returnErr = serviceerror.NewUnavailable("workflow condition failed")
-	case *persistence.CurrentWorkflowConditionFailedError:
-		logErrMessage = fmt.Sprintf("current workflow condition failed for RunID %s, Status %s, State %s: %s",
-			err.RunID, err.Status.String(), err.State.String(), err.Msg)
-		returnErr = serviceerror.NewUnavailablef("current workflow condition failed for RunID %s", err.RunID)
-	case *persistence.ConditionFailedError:
-		logErrMessage = fmt.Sprintf("condition failed: %s", err.Msg)
+	case errors.As(err, &currentWorkflowConditionFailedErr):
+		logErrMessage = fmt.Sprintf(
+			"current workflow condition failed for RunID %s, Status %s, State %s: %s",
+			currentWorkflowConditionFailedErr.RunID,
+			currentWorkflowConditionFailedErr.Status.String(),
+			currentWorkflowConditionFailedErr.State.String(),
+			currentWorkflowConditionFailedErr.Msg)
+		returnErr = serviceerror.NewUnavailablef("current workflow condition failed for RunID %s",
+			currentWorkflowConditionFailedErr.RunID)
+	case errors.As(err, &conditionFailedErr):
+		logErrMessage = fmt.Sprintf("condition failed: %s", conditionFailedErr.Msg)
 		returnErr = serviceerror.NewUnavailable("condition failed")
-	case *persistence.TransactionSizeLimitError:
-		logErrMessage = fmt.Sprintf("transaction size limit exceeded: %s", err.Msg)
+	case errors.As(err, &transactionSizeLimitErr):
+		logErrMessage = fmt.Sprintf("transaction size limit exceeded: %s", transactionSizeLimitErr.Msg)
 		returnErr = serviceerror.NewInvalidArgument("transaction size limit exceeded")
-	case *persistence.TimeoutError:
-		logErrMessage = fmt.Sprintf("persistence operation timed out: %s", err.Msg)
+	case errors.As(err, &timeoutErr):
+		logErrMessage = fmt.Sprintf("persistence operation timed out: %s", timeoutErr.Msg)
 		returnErr = serviceerror.NewDeadlineExceeded("persistence operation timed out")
 	default:
 		logErrMessage = fmt.Sprintf("uncategorized chasm engine error: %v", err)
