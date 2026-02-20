@@ -1070,9 +1070,9 @@ func (e *ChasmEngine) getExecutionLease(
 }
 
 // convertError converts non-serviceerror errors to appropriate serviceerror types, or keeps any chasm specific errors
-// as is. It ensures all errors returned are service or chasm errors and also  handles persistence layer errors
-// appropriately. When component archetypeID and businessID are non-zero/non-empty, it can provide more helpful NotFound
-// error messages.
+// as is. It ensures all errors returned are service, chasm, or context errors (for example, context.Canceled and
+// context.DeadlineExceeded) and also handles persistence layer errors appropriately. When component archetypeID and
+// businessID are non-zero/non-empty, it can provide more helpful NotFound error messages.
 func (e *ChasmEngine) convertError(
 	err error,
 	ref chasm.ComponentRef,
