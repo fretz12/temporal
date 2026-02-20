@@ -176,10 +176,7 @@ func (e *ChasmEngine) StartExecution(
 		currentRunInfo,
 		options,
 	)
-	if err != nil {
-		return result, e.convertError(err, executionRef, shardContext.GetLogger())
-	}
-	return result, nil
+	return result, e.convertError(err, executionRef, shardContext.GetLogger())
 }
 
 func (e *ChasmEngine) UpdateWithStartExecution(
