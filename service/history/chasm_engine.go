@@ -1157,7 +1157,7 @@ func (e *ChasmEngine) convertPersistenceError(err error, logger log.Logger) erro
 		returnErr = serviceerror.NewUnavailable("shard ownership lost")
 	case errors.As(err, &appendHistoryTimeoutErr):
 		logErrMessage = appendHistoryTimeoutErr.Msg
-		returnErr = serviceerror.NewUnavailablef("append history timed out")
+		returnErr = serviceerror.NewUnavailable("append history timed out")
 	case errors.As(err, &workflowConditionFailedErr):
 		logErrMessage = fmt.Sprintf("workflow condition failed for DBRecordVersion %d, nextEventID %d: %s",
 			workflowConditionFailedErr.DBRecordVersion, workflowConditionFailedErr.NextEventID, workflowConditionFailedErr.Msg)
