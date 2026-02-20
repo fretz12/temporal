@@ -1649,7 +1649,7 @@ func (s *chasmEngineSuite) TestConvertError() {
 					var unavailable *serviceerror.Unavailable
 					require.ErrorAs(t, err, &unavailable)
 				},
-				expectedErrMsg: []string{"shard ownership lost", "123"},
+				expectedErrMsg: []string{"shard ownership lost"},
 			},
 			{
 				name: "AppendHistoryTimeoutError",

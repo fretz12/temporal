@@ -1140,7 +1140,7 @@ func (e *ChasmEngine) convertError(
 	switch {
 	case errors.As(err, &shardOwnershipLostErr):
 		logErrMessage = shardOwnershipLostErr.Msg
-		returnErr = serviceerror.NewUnavailablef("shard ownership lost for shard %d", shardOwnershipLostErr.ShardID)
+		returnErr = serviceerror.NewUnavailable("shard ownership lost")
 	case errors.As(err, &appendHistoryTimeoutErr):
 		logErrMessage = appendHistoryTimeoutErr.Msg
 		returnErr = serviceerror.NewUnavailablef("append history timed out")
