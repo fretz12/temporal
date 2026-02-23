@@ -11,14 +11,17 @@ import (
 	enumsspb "go.temporal.io/server/api/enums/v1"
 	"go.temporal.io/server/chasm"
 	"go.temporal.io/server/common"
+	"go.temporal.io/server/common/convert"
 	"go.temporal.io/server/common/definition"
 	"go.temporal.io/server/common/headers"
 	"go.temporal.io/server/common/locks"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/log/tag"
+	"go.temporal.io/server/common/membership"
 	"go.temporal.io/server/common/namespace"
 	"go.temporal.io/server/common/persistence"
 	"go.temporal.io/server/common/primitives"
+	serviceerrors "go.temporal.io/server/common/serviceerror"
 	"go.temporal.io/server/common/softassert"
 	"go.temporal.io/server/service/history/api"
 	"go.temporal.io/server/service/history/configs"
@@ -32,12 +35,14 @@ import (
 
 type (
 	ChasmEngine struct {
-		executionCache  cache.Cache
-		shardController shard.Controller
-		registry        *chasm.Registry
-		config          *configs.Config
-		notifier        *ChasmNotifier
-		logger          log.Logger
+		executionCache         cache.Cache
+		shardController        shard.Controller
+		registry               *chasm.Registry
+		config                 *configs.Config
+		notifier               *ChasmNotifier
+		logger                 log.Logger
+		historyServiceResolver membership.ServiceResolver
+		hostInfoProvider       membership.HostInfoProvider
 	}
 
 	newExecutionParams struct {
@@ -76,13 +81,17 @@ func newChasmEngine(
 	config *configs.Config,
 	notifier *ChasmNotifier,
 	logger log.Logger,
+	historyServiceResolver membership.ServiceResolver,
+	hostInfoProvider membership.HostInfoProvider,
 ) *ChasmEngine {
 	return &ChasmEngine{
-		executionCache: executionCache,
-		registry:       registry,
-		config:         config,
-		notifier:       notifier,
-		logger:         logger,
+		executionCache:         executionCache,
+		registry:               registry,
+		config:                 config,
+		notifier:               notifier,
+		logger:                 logger,
+		historyServiceResolver: historyServiceResolver,
+		hostInfoProvider:       hostInfoProvider,
 	}
 }
 
@@ -1136,9 +1145,15 @@ func (e *ChasmEngine) convertPersistenceOrUnknownError(err error, logger log.Log
 		requestID = uuid.NewString()
 	}
 
+	var solErr *persistence.ShardOwnershipLostError
+
 	switch {
-	case errors.As(err, new(*persistence.ShardOwnershipLostError)):
-		return serviceerror.NewUnavailablef("shard ownership lost (%s)", requestID)
+	case errors.As(err, &solErr):
+		hostInfo := e.hostInfoProvider.HostInfo()
+		if ownerInfo, err := e.historyServiceResolver.Lookup(convert.Int32ToString(solErr.ShardID)); err == nil {
+			return serviceerrors.NewShardOwnershipLost(ownerInfo.GetAddress(), hostInfo.GetAddress())
+		}
+		return serviceerrors.NewShardOwnershipLost("", hostInfo.GetAddress())
 	case errors.As(err, new(*persistence.AppendHistoryTimeoutError)):
 		return serviceerror.NewUnavailablef("append history timed out (%s)", requestID)
 	case errors.As(err, new(*persistence.WorkflowConditionFailedError)):

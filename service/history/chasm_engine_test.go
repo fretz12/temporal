@@ -18,10 +18,12 @@ import (
 	"go.temporal.io/server/chasm"
 	"go.temporal.io/server/common/cluster"
 	"go.temporal.io/server/common/dynamicconfig"
+	"go.temporal.io/server/common/membership"
 	"go.temporal.io/server/common/metrics"
 	"go.temporal.io/server/common/namespace"
 	"go.temporal.io/server/common/persistence"
 	"go.temporal.io/server/common/persistence/serialization"
+	serviceerrors "go.temporal.io/server/common/serviceerror"
 	"go.temporal.io/server/common/testing/protorequire"
 	"go.temporal.io/server/common/testing/testvars"
 	"go.temporal.io/server/service/history/configs"
@@ -124,6 +126,8 @@ func (s *chasmEngineSuite) SetupTest() {
 		s.config,
 		NewChasmNotifier(),
 		s.mockShard.GetLogger(),
+		s.mockShard.Resource.HistoryServiceResolver,
+		s.mockShard.Resource.HostInfoProvider,
 	)
 	s.engine.SetShardController(s.mockShardController)
 }
@@ -1638,6 +1642,7 @@ func (s *chasmEngineSuite) TestConvertError() {
 		persistenceErrorCases := []struct {
 			name           string
 			err            error
+			setupMocks     func()
 			assertErrType  func(t *testing.T, err error)
 			expectedErrMsg []string
 		}{
@@ -1647,11 +1652,50 @@ func (s *chasmEngineSuite) TestConvertError() {
 					ShardID: 123,
 					Msg:     "shard ownership lost",
 				},
-				assertErrType: func(t *testing.T, err error) {
-					var unavailable *serviceerror.Unavailable
-					require.ErrorAs(t, err, &unavailable)
+				setupMocks: func() {
+					ownerHost := membership.NewHostInfoFromAddress("owner-host:1234")
+					currentHost := membership.NewHostInfoFromAddress("current-host:5678")
+					s.mockShard.Resource.HistoryServiceResolver.EXPECT().
+						Lookup("123").
+						Return(ownerHost, nil).
+						Times(1)
+					s.mockShard.Resource.HostInfoProvider.EXPECT().
+						HostInfo().
+						Return(currentHost).
+						Times(1)
 				},
-				expectedErrMsg: []string{"shard ownership lost"},
+				assertErrType: func(t *testing.T, err error) {
+					var solErr *serviceerrors.ShardOwnershipLost
+					require.ErrorAs(t, err, &solErr)
+					require.Equal(t, "owner-host:1234", solErr.OwnerHost)
+					require.Equal(t, "current-host:5678", solErr.CurrentHost)
+				},
+				expectedErrMsg: []string{"Shard is owned by:owner-host:1234 but not by current-host:5678"},
+			},
+			{
+				name: "ShardOwnershipLostError_LookupFails",
+				err: &persistence.ShardOwnershipLostError{
+					ShardID: 456,
+					Msg:     "shard ownership lost",
+				},
+				setupMocks: func() {
+					currentHost := membership.NewHostInfoFromAddress("current-host:5678")
+					s.mockShard.Resource.HistoryServiceResolver.EXPECT().
+						Lookup("456").
+						Return(nil, errors.New("lookup failed")).
+						Times(1)
+					s.mockShard.Resource.HostInfoProvider.EXPECT().
+						HostInfo().
+						Return(currentHost).
+						Times(1)
+				},
+				assertErrType: func(t *testing.T, err error) {
+					var solErr *serviceerrors.ShardOwnershipLost
+					require.ErrorAs(t, err, &solErr)
+					require.Equal(t, "", solErr.OwnerHost)
+					require.Equal(t, "current-host:5678", solErr.CurrentHost)
+				},
+				expectedErrMsg: []string{"Shard is owned by: but not by current-host:5678"},
 			},
 			{
 				name: "AppendHistoryTimeoutError",
@@ -1728,6 +1772,9 @@ func (s *chasmEngineSuite) TestConvertError() {
 
 		for _, tc := range persistenceErrorCases {
 			t.Run(tc.name, func(t *testing.T) {
+				if tc.setupMocks != nil {
+					tc.setupMocks()
+				}
 				convertedErr := s.engine.convertError(tc.err, ref, logger, tv.RequestID())
 				require.Error(t, convertedErr)
 				tc.assertErrType(t, convertedErr)
