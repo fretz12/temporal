@@ -36,6 +36,7 @@ type (
 		registry        *chasm.Registry
 		config          *configs.Config
 		notifier        *ChasmNotifier
+		logger          log.Logger
 	}
 
 	newExecutionParams struct {
@@ -73,12 +74,14 @@ func newChasmEngine(
 	registry *chasm.Registry,
 	config *configs.Config,
 	notifier *ChasmNotifier,
+	logger log.Logger,
 ) *ChasmEngine {
 	return &ChasmEngine{
 		executionCache: executionCache,
 		registry:       registry,
 		config:         config,
 		notifier:       notifier,
+		logger:         logger,
 	}
 }
 
@@ -104,7 +107,7 @@ func (e *ChasmEngine) StartExecution(
 
 	shardContext, err := e.getShardContext(executionRef)
 	if err != nil {
-		return chasm.StartExecutionResult{}, e.convertError(err, executionRef, nil)
+		return chasm.StartExecutionResult{}, e.convertError(err, executionRef, e.logger)
 	}
 
 	archetypeID, err := executionRef.ArchetypeID(e.registry)
@@ -190,7 +193,7 @@ func (e *ChasmEngine) UpdateWithStartExecution(
 
 	shardContext, err := e.getShardContext(executionRef)
 	if err != nil {
-		return chasm.EngineUpdateWithStartExecutionResult{}, e.convertError(err, executionRef, nil)
+		return chasm.EngineUpdateWithStartExecutionResult{}, e.convertError(err, executionRef, e.logger)
 	}
 
 	archetypeID, err := executionRef.ArchetypeID(e.registry)
@@ -424,21 +427,16 @@ func (e *ChasmEngine) UpdateComponent(
 ) (updatedRef []byte, retError error) {
 	shardContext, executionLease, err := e.getExecutionLease(ctx, ref)
 	if err != nil {
-		return nil, e.convertError(err, ref, nil)
+		return nil, e.convertError(err, ref, e.logger)
 	}
 
 	defer func() {
 		executionLease.GetReleaseFn()(retError)
 	}()
 
-	serializedRef, err := e.applyUpdateWithLease(ctx, shardContext, executionLease, ref, updateFn)
-	if err != nil {
-		// Error conversion is handled inside applyUpdateWithLease as we don't want to convert any errors originating
-		// from updateFn
-		return nil, err
-	}
-
-	return serializedRef, nil
+	// Error conversion is handled inside applyUpdateWithLease as we don't want to convert any errors originating
+	// from updateFn
+	return e.applyUpdateWithLease(ctx, shardContext, executionLease, ref, updateFn)
 }
 
 // ReadComponent evaluates readFn against the current state of the component identified by the
@@ -452,7 +450,7 @@ func (e *ChasmEngine) ReadComponent(
 ) (retError error) {
 	shardContext, executionLease, err := e.getExecutionLease(ctx, ref)
 	if err != nil {
-		return e.convertError(err, ref, nil)
+		return e.convertError(err, ref, e.logger)
 	}
 	defer func() {
 		// Always release the lease with nil error since this is a read only operation

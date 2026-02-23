@@ -123,6 +123,7 @@ func (s *chasmEngineSuite) SetupTest() {
 		s.registry,
 		s.config,
 		NewChasmNotifier(),
+		s.mockShard.GetLogger(),
 	)
 	s.engine.SetShardController(s.mockShardController)
 }
