@@ -542,7 +542,7 @@ func (e *ChasmEngine) PollComponent(
 
 	shardContext, ref, err := checkPredicateOrSubscribe()
 	if err != nil || ref != nil {
-		var logger log.Logger
+		logger := e.logger
 		if shardContext != nil {
 			logger = shardContext.GetLogger()
 		}
@@ -554,7 +554,7 @@ func (e *ChasmEngine) PollComponent(
 		case <-ch:
 			shardContext, ref, err = checkPredicateOrSubscribe()
 			if err != nil || ref != nil {
-				var logger log.Logger
+				logger := e.logger
 				if shardContext != nil {
 					logger = shardContext.GetLogger()
 				}
