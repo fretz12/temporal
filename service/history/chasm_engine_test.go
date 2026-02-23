@@ -1692,7 +1692,7 @@ func (s *chasmEngineSuite) TestConvertError() {
 				assertErrType: func(t *testing.T, err error) {
 					var solErr *serviceerrors.ShardOwnershipLost
 					require.ErrorAs(t, err, &solErr)
-					require.Equal(t, "", solErr.OwnerHost)
+					require.Empty(t, solErr.OwnerHost)
 					require.Equal(t, "current-host:5678", solErr.CurrentHost)
 				},
 				expectedErrMsg: []string{"Shard is owned by: but not by current-host:5678"},
