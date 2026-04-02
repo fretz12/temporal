@@ -74,7 +74,8 @@ func (h *handler) StartActivityExecution(ctx context.Context, req *activitypb.St
 			}
 
 			if cbs := request.GetCompletionCallbacks(); len(cbs) > 0 {
-				if err := newActivity.addCompletionCallbacks(mutableContext, request.GetRequestId(), cbs); err != nil {
+				maxCallbacks := h.config.MaxCallbacksPerExecution(request.GetNamespace())
+				if err := newActivity.addCompletionCallbacks(mutableContext, request.GetRequestId(), cbs, maxCallbacks); err != nil {
 					return nil, err
 				}
 			}

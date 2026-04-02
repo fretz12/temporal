@@ -273,9 +273,19 @@ func (a *Activity) addCompletionCallbacks(
 	ctx chasm.MutableContext,
 	requestID string,
 	completionCallbacks []*commonpb.Callback,
+	maxCallbacks int,
 ) error {
 	if len(completionCallbacks) == 0 {
 		return nil
+	}
+
+	currentCount := len(a.Callbacks)
+	if len(completionCallbacks)+currentCount > maxCallbacks {
+		return serviceerror.NewFailedPreconditionf(
+			"cannot attach more than %d callbacks to an activity (%d callbacks already attached)",
+			maxCallbacks,
+			currentCount,
+		)
 	}
 
 	if a.Callbacks == nil {
@@ -297,7 +307,7 @@ func (a *Activity) addCompletionCallbacks(
 				},
 			}
 		default:
-			return fmt.Errorf("unsupported callback variant: %T", variant)
+			return serviceerror.NewInvalidArgumentf("unsupported callback variant: %T", variant)
 		}
 
 		id := fmt.Sprintf("%s-%d", requestID, idx)

@@ -37,6 +37,7 @@ type Config struct {
 	LongPollBuffer              dynamicconfig.DurationPropertyFnWithNamespaceFilter
 	LongPollTimeout             dynamicconfig.DurationPropertyFnWithNamespaceFilter
 	MaxIDLengthLimit            dynamicconfig.IntPropertyFn
+	MaxCallbacksPerExecution    dynamicconfig.IntPropertyFnWithNamespaceFilter
 	DefaultActivityRetryPolicy  dynamicconfig.TypedPropertyFnWithNamespaceFilter[retrypolicy.DefaultRetrySettings]
 	VisibilityMaxPageSize       dynamicconfig.IntPropertyFnWithNamespaceFilter
 }
@@ -51,6 +52,7 @@ func ConfigProvider(dc *dynamicconfig.Collection) *Config {
 		LongPollBuffer:              LongPollBuffer.Get(dc),
 		LongPollTimeout:             LongPollTimeout.Get(dc),
 		MaxIDLengthLimit:            dynamicconfig.MaxIDLengthLimit.Get(dc),
+		MaxCallbacksPerExecution:    dynamicconfig.MaxCallbacksPerExecution.Get(dc),
 		VisibilityMaxPageSize:       dynamicconfig.FrontendVisibilityMaxPageSize.Get(dc),
 	}
 }
