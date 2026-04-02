@@ -59,7 +59,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.40.0
 	go.opentelemetry.io/otel/sdk/metric v1.40.0
 	go.opentelemetry.io/otel/trace v1.40.0
-	go.temporal.io/api v1.62.7-0.20260401232052-2c2d519a2dd0
+	go.temporal.io/api v1.62.7-0.20260401232052-2c2d519a2dd0 // TODO: this is dev branch; update when api changes merged
 	go.temporal.io/sdk v1.41.1
 	go.uber.org/fx v1.24.0
 	go.uber.org/mock v0.6.0
