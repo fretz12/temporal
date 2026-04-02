@@ -73,7 +73,7 @@ type Activity struct {
 	Store chasm.ParentPtr[ActivityStore]
 
 	// Callbacks holds completion callbacks to be invoked when this standalone activity reaches a terminal state. Nil
-	//for workflow-embedded activities as the workflow handles its own callbacks.
+	// for workflow-embedded activities as the workflow handles its own callbacks.
 	Callbacks chasm.Map[string, *callback.Callback]
 }
 
@@ -336,7 +336,7 @@ func (a *Activity) processCloseCallbacks(ctx chasm.MutableContext) error {
 // Implements callback.CompletionSource.
 func (a *Activity) GetNexusCompletion(ctx chasm.Context, _ string) (nexusrpc.CompleteOperationOptions, error) {
 	if !a.LifecycleState(ctx).IsClosed() {
-		return nexusrpc.CompleteOperationOptions{}, fmt.Errorf("activity has not completed yet")
+		return nexusrpc.CompleteOperationOptions{}, serviceerror.NewFailedPrecondition("activity has not completed yet")
 	}
 
 	attempt := a.LastAttempt.Get(ctx)
@@ -376,7 +376,7 @@ func (a *Activity) GetNexusCompletion(ctx chasm.Context, _ string) (nexusrpc.Com
 
 		nf, err := commonnexus.TemporalFailureToNexusFailure(failure)
 		if err != nil {
-			return nexusrpc.CompleteOperationOptions{}, fmt.Errorf("failed to convert failure: %w", err)
+			return nexusrpc.CompleteOperationOptions{}, serviceerror.NewInternalf("failed to convert failure: %v", err)
 		}
 
 		opErr := &nexus.OperationError{
