@@ -73,6 +73,12 @@ func (h *handler) StartActivityExecution(ctx context.Context, req *activitypb.St
 				return nil, err
 			}
 
+			if cbs := request.GetCompletionCallbacks(); len(cbs) > 0 {
+				if err := newActivity.addCompletionCallbacks(mutableContext, request.GetRequestId(), cbs); err != nil {
+					return nil, err
+				}
+			}
+
 			err = TransitionScheduled.Apply(newActivity, mutableContext, nil)
 			if err != nil {
 				return nil, err

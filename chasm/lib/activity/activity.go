@@ -6,6 +6,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/nexus-rpc/sdk-go/nexus"
 	apiactivitypb "go.temporal.io/api/activity/v1" //nolint:importas
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
@@ -18,10 +19,14 @@ import (
 	tokenspb "go.temporal.io/server/api/token/v1"
 	"go.temporal.io/server/chasm"
 	"go.temporal.io/server/chasm/lib/activity/gen/activitypb/v1"
+	"go.temporal.io/server/chasm/lib/callback"
+	callbackspb "go.temporal.io/server/chasm/lib/callback/gen/callbackpb/v1"
 	"go.temporal.io/server/common"
 	"go.temporal.io/server/common/backoff"
 	"go.temporal.io/server/common/metrics"
 	"go.temporal.io/server/common/namespace"
+	commonnexus "go.temporal.io/server/common/nexus"
+	"go.temporal.io/server/common/nexus/nexusrpc"
 	"go.temporal.io/server/common/payload"
 	serviceerrors "go.temporal.io/server/common/serviceerror"
 	"go.temporal.io/server/common/tqid"
@@ -41,6 +46,7 @@ var (
 )
 
 var _ chasm.VisibilitySearchAttributesProvider = (*Activity)(nil)
+var _ callback.CompletionSource = (*Activity)(nil)
 
 type ActivityStore interface {
 	// RecordCompleted applies the provided function to record activity completion
@@ -65,6 +71,10 @@ type Activity struct {
 	// implements the ActivityStore interface).
 	// TODO(saa-preview): figure out better naming.
 	Store chasm.ParentPtr[ActivityStore]
+
+	// Callbacks holds completion callbacks to be invoked when this standalone activity reaches a terminal state. Nil
+	//for workflow-embedded activities as the workflow handles its own callbacks.
+	Callbacks chasm.Map[string, *callback.Callback]
 }
 
 // WithToken wraps a request with its deserialized task token.
@@ -251,8 +261,126 @@ func attemptScheduleTimeForRetry(attempt *activitypb.ActivityAttemptState) *time
 }
 
 // RecordCompleted applies the provided function to record activity completion.
+// For standalone activities, it also triggers any registered completion callbacks.
 func (a *Activity) RecordCompleted(ctx chasm.MutableContext, applyFn func(ctx chasm.MutableContext) error) error {
-	return applyFn(ctx)
+	if err := applyFn(ctx); err != nil {
+		return err
+	}
+	return a.processCloseCallbacks(ctx)
+}
+
+func (a *Activity) addCompletionCallbacks(
+	ctx chasm.MutableContext,
+	requestID string,
+	completionCallbacks []*commonpb.Callback,
+) error {
+	if len(completionCallbacks) == 0 {
+		return nil
+	}
+
+	if a.Callbacks == nil {
+		a.Callbacks = make(chasm.Map[string, *callback.Callback], len(completionCallbacks))
+	}
+
+	registrationTime := timestamppb.New(ctx.Now(a))
+
+	for idx, cb := range completionCallbacks {
+		chasmCB := &callbackspb.Callback{
+			Links: cb.GetLinks(),
+		}
+		switch variant := cb.Variant.(type) {
+		case *commonpb.Callback_Nexus_:
+			chasmCB.Variant = &callbackspb.Callback_Nexus_{
+				Nexus: &callbackspb.Callback_Nexus{
+					Url:    variant.Nexus.GetUrl(),
+					Header: variant.Nexus.GetHeader(),
+				},
+			}
+		default:
+			return fmt.Errorf("unsupported callback variant: %T", variant)
+		}
+
+		id := fmt.Sprintf("%s-%d", requestID, idx)
+		callbackObj := callback.NewCallback(requestID, registrationTime, &callbackspb.CallbackState{}, chasmCB)
+		a.Callbacks[id] = chasm.NewComponentField(ctx, callbackObj)
+	}
+	return nil
+}
+
+// processCloseCallbacks triggers all STANDBY completion callbacks by transitioning them
+// to SCHEDULED state, which causes the callback library to invoke them.
+func (a *Activity) processCloseCallbacks(ctx chasm.MutableContext) error {
+	for _, field := range a.Callbacks {
+		cb := field.Get(ctx)
+		if cb.Status != callbackspb.CALLBACK_STATUS_STANDBY {
+			continue
+		}
+		if err := callback.TransitionScheduled.Apply(cb, ctx, callback.EventScheduled{}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// GetNexusCompletion returns the activity's completion data in the format required by the Nexus callback invocation.
+// Implements callback.CompletionSource.
+func (a *Activity) GetNexusCompletion(ctx chasm.Context, _ string) (nexusrpc.CompleteOperationOptions, error) {
+	if !a.LifecycleState(ctx).IsClosed() {
+		return nexusrpc.CompleteOperationOptions{}, fmt.Errorf("activity has not completed yet")
+	}
+
+	attempt := a.LastAttempt.Get(ctx)
+	opts := nexusrpc.CompleteOperationOptions{
+		StartTime: attempt.GetStartedTime().AsTime(),
+		CloseTime: attempt.GetCompleteTime().AsTime(),
+	}
+
+	outcome := a.Outcome.Get(ctx)
+	if successful := outcome.GetSuccessful(); successful != nil {
+		// Successful completion: return the first output payload as the result as Nexus supports only a single payload
+		var p *commonpb.Payload
+		if payloads := successful.GetOutput().GetPayloads(); len(payloads) > 0 {
+			p = payloads[0]
+		}
+		opts.Result = p
+		return opts, nil
+	}
+
+	var failure *failurepb.Failure
+	if f := outcome.GetFailed(); f != nil {
+		failure = f.GetFailure()
+	}
+	if failure == nil {
+		if details := attempt.GetLastFailureDetails(); details != nil {
+			failure = details.GetFailure()
+		}
+	}
+
+	if failure != nil {
+		state := nexus.OperationStateFailed
+		message := "operation failed"
+		if a.Status == activitypb.ACTIVITY_EXECUTION_STATUS_CANCELED {
+			state = nexus.OperationStateCanceled
+			message = "operation canceled"
+		}
+
+		nf, err := commonnexus.TemporalFailureToNexusFailure(failure)
+		if err != nil {
+			return nexusrpc.CompleteOperationOptions{}, fmt.Errorf("failed to convert failure: %w", err)
+		}
+
+		opErr := &nexus.OperationError{
+			State:   state,
+			Message: message,
+			Cause:   &nexus.FailureError{Failure: nf},
+		}
+		if err := nexusrpc.MarkAsWrapperError(nexusrpc.DefaultFailureConverter(), opErr); err != nil {
+			return nexusrpc.CompleteOperationOptions{}, err
+		}
+		opts.Error = opErr
+	}
+
+	return opts, nil
 }
 
 // HandleCompleted updates the activity on activity completion.
